@@ -7,7 +7,9 @@ lr_params = {
     "A_neg": 0.2,
     "tau_pos": 1.1,
     "tau_neg": 1.1,
-    "alpha": 0.2,
+    "alpha": 10**-2,
+    "beta": 10**-6,
+    "tau": 1000.
 }
 dynamics = {
     neuronType.phasic_spike : {"a": 0.02, "b": 0.25, "c": -65, "d": 6, "I": 0.5},

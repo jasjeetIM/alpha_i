@@ -1,7 +1,8 @@
 import numpy as np
 import cv2
 from neuron import Neuron, NeuronType
-import time
+import time, math
+from hyperparams import *
 
 def resizeFrame(frame):
     frame = frame[30:-12,5:-4]
@@ -47,7 +48,8 @@ def getGradientDataStruc(Motor_columns, columnToLayer,layerToNeuron, memory):
 	return dv_dv, dv_dw, idx_to_nid, nid_to_idx
 	
 	 
-def gradientDescent(act, Motor_levelToColumns,columnToLayer, layerToNeuron,adj,idx_to_nid,nid_to_idx,spikes,trans, dv_dv, dv_dw, idx, window_size, alpha, a, b,neighbors, v):
+def gradientDescent(act, Motor_levelToColumns,columnToLayer, layerToNeuron,adj,idx_to_nid,nid_to_idx,spikes,trans, dv_dv, dv_dw, idx, window_size, neighbors, v):
+	alpha, tau, a, b = lr_params['alpha'], lr_params['tau'], dynamics[0]['a'], dynamics[0]['b']
 	output_columns_motor = Motor_levelToColumns[0]
 	total_loss = 0.
 	curr_level = []
@@ -60,17 +62,17 @@ def gradientDescent(act, Motor_levelToColumns,columnToLayer, layerToNeuron,adj,i
 				if trans[neuron_id] < 0 and spikes[neuron_id, idx] == 1: 
 					#Inhib should not have fired
 					total_loss+=1					
-					curr_level.append((neuron_id,1./100.))
+					curr_level.append((neuron_id,tau*1./100.))
 				elif trans[neuron_id] > 0 and spikes[neuron_id,idx] == 0:
 					total_loss+=1
-					curr_level.append((neuron_id,-1./100.))
-
+					curr_level.append((neuron_id,-1.*tau/100.))
 	print('Total Loss: {}'.format(total_loss))
 	
 	#BFS : gradient descent 
 	total_delta = 0.
 	curr_idx = idx - 1 
 	d_curr_idx = window_size - 1 
+	print('Starting with {} target neurons'.format(len(curr_level)))
 	#This means that curr_idx represents derivative from the prev time step (idx - 1)
 	# which we consider as the latest derivative (window_size -1)
 	next_level = []
@@ -79,19 +81,19 @@ def gradientDescent(act, Motor_levelToColumns,columnToLayer, layerToNeuron,adj,i
 	while curr_level and d_curr_idx >= 0:
 		node, prev_ = curr_level.pop(0)
 		neigh = adj[node]
-		
+
 		node_idx = nid_to_idx[node]
 		#print(neigh)
 		for nei in neigh:
-			if nei not in adj:
+			if nei not in adj: #This restricts GD to only motor columns as adj only contians those
 				continue
 			#print(nei)
 			start = time.time()
-			nei_idx = nid_to_idx[nei]
+			nei_idx = nid_to_idx[nei] 
 			#This will be true when we start GD
-			if dv_dw[node_idx, nei_idx, d_curr_idx] == np.nan:
+			if math.isnan(dv_dw[node_idx, nei_idx, d_curr_idx]):
 				#calculate dv_dw if we have 2 previous values
-				if dv_dw[node_idx, nei_idx, d_curr_idx-1] != np.nan and dv_dw[node_idx, nei_idx, d_curr_idx-2] != np.nan:
+				if not math.isnan(dv_dw[node_idx, nei_idx, d_curr_idx-1]) and not math.isnan(dv_dw[node_idx, nei_idx, d_curr_idx-2]):
 					dw = 0.08*v[node,curr_idx-1]*dv_dw[node_idx, nei_idx, d_curr_idx-1] + \
 						 5.*dv_dw[node_idx, nei_idx, d_curr_idx-1] - a*b*dv_dw[node_idx, nei_idx, d_curr_idx-2] + \
 						((v[nei, curr_idx-1] + 70.0)/100.)*trans[nei]
@@ -103,11 +105,12 @@ def gradientDescent(act, Motor_levelToColumns,columnToLayer, layerToNeuron,adj,i
 			
 			#Update weight in a zig-zaggy manner. 
 			# Weights will move up and down depending on derivative at various time steps
-			neighbors[node, nei]= neighbors[node, nei] + alpha*prev_*dv_dw[node_idx, nei_idx, d_curr_idx]
+			neighbors[node, nei]= np.clip(neighbors[node, nei] + alpha*prev_*dv_dw[node_idx, nei_idx, d_curr_idx], 0.0,1.0)
+
 			total_delta+=(alpha*prev_*dv_dw[node_idx, nei_idx, d_curr_idx])
-			if dv_dv[node_idx, nei_idx, d_curr_idx] == np.nan:
+			if math.isnan(dv_dv[node_idx, nei_idx, d_curr_idx]):
 				#calculate dv_dv
-				if dv_dv[node_idx, nei_idx, d_curr_idx-1] != np.nan and dv_dv[node_idx, nei_idx, d_curr_idx-2] != np.nan:
+				if not math.isnan(dv_dv[node_idx, nei_idx, d_curr_idx-1]) and not math.isnan(dv_dv[node_idx, nei_idx, d_curr_idx-2]):
 					dv = 0.08*v[node,curr_idx-1]*dv_dv[node_idx, nei_idx, d_curr_idx-1] + \
 						 5.*dv_dv[node_idx, nei_idx, d_curr_idx-1] - a*b*dv_dv[node_idx, nei_idx, d_curr_idx-2] + \
 						neighbors[node, nei]*trans[nei]
@@ -122,21 +125,24 @@ def gradientDescent(act, Motor_levelToColumns,columnToLayer, layerToNeuron,adj,i
 			#BFS step
 			next_level.append((nei, prev_))
 			total_steps+=1
-			print('Steps = {}, Time = {}'.format(total_steps, time.time() - start))
+			#print('Steps = {}, Delta = {}'.format(total_steps, time.time() - start))
 		
 		if not curr_level:
+			print('Total Steps at level = {}, Completed Time Point {}'.format(total_steps, d_curr_idx+1))
 			curr_level = next_level
 			next_level = []
 			curr_idx-=1
 			d_curr_idx-=1
+			total_steps = 0
 					
 				
 	dv_dw*=np.nan
 	dv_dv*=np.nan
+
 	print('GD: Total delta_w: {}'.format(total_delta))
 	return neighbors
 	
-def stdp(neighbors, spikes, adj_motor, idx, memory, lr_params):
+def stdp(neighbors, spikes, adj_motor, idx, memory):
 	total_delta=0
 	for i in range(neighbors.shape[0]):
 		if i not in adj_motor:
@@ -172,14 +178,15 @@ def stdp(neighbors, spikes, adj_motor, idx, memory, lr_params):
 					delta_w -= lr_params["A_neg"]/np.exp((nei_spike - self_spike)/lr_params["tau_neg"])
 					nei_ptr+=1
 				#Update the weight
-				neighbors[i, nei] = neighbors[i, nei] + delta_w
+				neighbors[i, nei] = np.clip(neighbors[i, nei] + lr_params['beta']*delta_w, 0.0, 1.0)
+
 				total_delta+=delta_w
 				del nei_spikes
 			del self_spikes
 
 				
 			
-	print('Total delta_w: {}'.format(total_delta))
+	print('STDP delta_w: {}'.format(total_delta))
 	return neighbors
 
 def connectRegion(columns, parentEdges, siblingEdges, childEdges, columnToLayer,layerIdToNum,sameCol, parentCol,childCol, sibCol, layerToNeuron, neighbors, numConnections): 
@@ -220,7 +227,7 @@ def generateVisionNeurons(width=84, height=84,neurons_per_pixel=15):
     return neurons
 
 def connectVisionNeurons(Thalmus_levelToColumns, columnToLayer, layerToNeurons,vision_neurons, k, stride):
-    last_level = len(Thalmus_levelToColumns)
+    last_level = len(Thalmus_levelToColumns) # Lowest level of Thalmus Tree
     input_columns = Thalmus_levelToColumns[last_level-1]
     m,n = vision_neurons.shape[0], vision_neurons.shape[1]
     
@@ -243,13 +250,14 @@ def connectVisionNeurons(Thalmus_levelToColumns, columnToLayer, layerToNeurons,v
     columnIdx = 0
     for x in range(num_hor):
         for y in range(num_ver):
-            vision_win = vision_neurons[y:y+k,x:x+k].flatten()
+            vision_win = vision_neurons[y:y+k,x:x+k].flatten() #get neuronIds of vision window
             layerId = columnToLayer[input_columns[columnIdx]][3] #4th layer
             inp_neurons = layerToNeurons[layerId]
             columnIdx+=1
             for inp in inp_neurons:
                vision_adj_idx_to_neuronId[inp_idx] = inp
-               vision_adj[inp_idx, vision_win] = np.random.random() #initialize weights
+               vision_adj[inp_idx, vision_win] = np.random.random()*10**-3 #initialize weights
+               #print(np.sum(vision_adj[inp_idx,vision_win]))
                inp_idx+=1
 
     return vision_adj, vision_adj_idx_to_neuronId
